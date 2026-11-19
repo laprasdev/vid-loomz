@@ -26,6 +26,7 @@ YT_URL_PATTERNS = [
     re.compile(r'(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})'),
 ]
 YT_TIME_PATTERN = re.compile(r'[?&]t=(\d+)')
+NAME_TEMPLATE = "%(title)s_%(id)s"
 
 def export_dest_for_log():
     return f"{GLOBAL_EXPORTS}/\u007bfile\u007d"
@@ -49,14 +50,25 @@ def resolve_url(raw):
     return raw
 
 
-def fetch_title(url):
-    r = subprocess.run(["yt-dlp", "--print", "title", url], capture_output=True, text=True)
-    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+def yt_dlp(url, *arguments, **run):
+    # YouTube now requires cookies to pass its "confirm you're not a bot" check.
+    # Pull them from a logged-in browser; override with DLYT_COOKIES_BROWSER (e.g. edge, chrome).
+    browser = os.environ.get("DLYT_COOKIES_BROWSER", "brave")
+    return subprocess.run(["yt-dlp", "--cookies-from-browser", browser, *arguments, url], **run)
 
 
 def sanitize(name):
     name = re.sub(r'[^\w\s\-.]', '', name).strip()
     return re.sub(r'\s+', '_', name)
+
+
+def fetch_name(url):
+    """Name a download after its title and id, so no two videos share a folder or a file."""
+    r = yt_dlp(url, "--print", NAME_TEMPLATE, capture_output=True, text=True)
+    name = sanitize(r.stdout)
+    if r.returncode != 0 or not name:
+        sys.exit(f"could not read the title of {url}\n{r.stderr.strip()}")
+    return name
 
 
 def get_duration(path):
@@ -307,16 +319,13 @@ def prompt_formats(mp4_path, name, dests, fps, width, start_time=None):
 
 def do_download(url, tmp_dir):
     dl = Path(tmp_dir) / "download.mp4"
-    # YouTube now requires cookies to pass its "confirm you're not a bot" check.
-    # Pull them from a logged-in browser; override with DLYT_COOKIES_BROWSER (e.g. edge, chrome).
-    browser = os.environ.get("DLYT_COOKIES_BROWSER", "brave")
-    subprocess.run([
-        "yt-dlp",
-        "--cookies-from-browser", browser,
+    yt_dlp(
+        url,
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
-        "-o", str(dl), url
-    ], check=True)
+        "-o", str(dl),
+        check=True,
+    )
     found = next(Path(tmp_dir).glob("*.mp4"), None)
     if not found:
         print("download failed — no mp4 produced")
@@ -382,13 +391,11 @@ def prompt_clip(mp4_path, name, dests, start_time, dur):
 def download(url, fmt, fps, width, dest_mode=None, out=None, interactive=True, clean=False, start=None):
     start_time = extract_start_time(url) if start is None else start
     url = resolve_url(url)
-    title = fetch_title(url)
-    name = sanitize(title) if title else "download"
+    name = fetch_name(url)
     cwd = Path.cwd()
 
     print(f"── downloading {url}")
-    if title:
-        print(f"── {title}")
+    print(f"── {name}")
     if start_time is not None:
         print(f"── timestamp: {fmt_dur(start_time)}")
 
